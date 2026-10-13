@@ -1,66 +1,74 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { predictDemand } from "./forecast.mjs";
+import { readFileSync } from "node:fs";
+import {
+  getHistorySales,
+  predictDemand,
+  predictDemandFromSalesData,
+} from "./forecast.mjs";
 import { calculateReorderQuantity } from "./replenishment.mjs";
 
-test("A2 驗證：御飯糰平日常態銷售預測", () => {
-  const result = predictDemand({
-    productId: "P001",
-    historySales: [45, 48],
-    isHoliday: false,
-    isPromotion: false,
-  });
+const salesData = JSON.parse(
+  readFileSync(new URL("./sales_data.json", import.meta.url), "utf8"),
+);
 
-  // 移動平均 (45 + 48) / 2 = 46.5，四捨五入為 47
-  assert.equal(result.productId, "P001");
-  assert.equal(result.forecastDemand, 47);
+test("A2 forecasts normal demand from supplied history", () => {
+  assert.deepEqual(
+    predictDemand({ productId: "P001", historySales: [45, 48] }),
+    { productId: "P001", forecastDemand: 47 },
+  );
 });
 
-test("A2 驗證：週末促銷活動加權銷量增長", () => {
+test("A2 applies holiday and promotion multipliers", () => {
   const result = predictDemand({
     productId: "P001",
     historySales: [50, 50, 50],
-    isHoliday: true,     // 50 * 1.2 = 60
-    isPromotion: true,   // 60 * 1.3 = 78
+    isHoliday: true,
+    isPromotion: true,
   });
-
-  assert.equal(result.productId, "P001");
   assert.equal(result.forecastDemand, 78);
 });
 
-test("A2 驗證：統家個案活動大宗預約需求 (例如演唱會/活動需求 150 件)", () => {
+test("A2 adds explicit special demand", () => {
   const result = predictDemand({
     productId: "P002",
     historySales: [2, 3],
     specialDemand: 150,
   });
-
-  // 基礎平均 2.5 四捨五入為 3，加上特殊需求 150 = 153
-  assert.equal(result.productId, "P002");
   assert.equal(result.forecastDemand, 153);
 });
 
-test("A1 + A2 整合驗證：將預測結果直接代入 A1 補貨公式", () => {
-  // 1. 由 A2 模組產出預測需求物件
-  const forecast = predictDemand({
-    productId: "P001",
-    historySales: [45, 48],
-    isHoliday: true, // 假日加權 46.5 * 1.2 = 55.8 -> 56
+test("selects and forecasts latest available P001 records from sales_data.json", () => {
+  assert.deepEqual(getHistorySales(salesData, "P001"), [48, 65, 70]);
+  assert.deepEqual(
+    predictDemandFromSalesData({ salesData, productId: "P001" }),
+    { productId: "P001", forecastDemand: 61 },
+  );
+});
+
+test("keeps special-event history unless policy says otherwise", () => {
+  assert.deepEqual(getHistorySales(salesData, "P002"), [3, 4, 150]);
+});
+
+test("rejects missing product history and invalid inputs", () => {
+  assert.throws(() => getHistorySales(salesData, "UNKNOWN"), /No sales records found/);
+  assert.throws(
+    () => predictDemand({ productId: "P001", historySales: [] }),
+    /historySales must be a non-empty array/,
+  );
+  assert.throws(
+    () => predictDemand({ productId: "P001", historySales: [10], days: 0 }),
+    /days must be a positive integer/,
+  );
+});
+
+test("A1 + A2: file-backed forecast feeds replenishment", () => {
+  const forecast = predictDemandFromSalesData({
+    salesData, productId: "P001", isHoliday: true,
   });
-
-  assert.equal(forecast.productId, "P001");
-  assert.equal(forecast.forecastDemand, 56);
-
-  // 2. 直接解構並丟入 A1 的 calculateReorderQuantity 計算
-  const replenishmentResult = calculateReorderQuantity({
-    ...forecast,
-    safetyStock: 10,
-    onHand: 20,
-    orderMultiple: 1,
+  const result = calculateReorderQuantity({
+    ...forecast, safetyStock: 10, onHand: 20,
   });
-
-  // 目標庫存 = 56 + 10 = 66
-  // 建議訂購量 = 66 - 20 = 46
-  assert.equal(replenishmentResult.suggestedQuantity, 46);
-  assert.equal(replenishmentResult.needsReplenishment, true);
+  assert.equal(forecast.forecastDemand, 73);
+  assert.equal(result.suggestedQuantity, 63);
 });
