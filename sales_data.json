@@ -1,0 +1,83 @@
+[
+  {
+    "date": "2026-10-01",
+    "productId": "P001",
+    "productName": "鮪魚御飯糰",
+    "salesQuantity": 45,
+    "isHoliday": false,
+    "isPromotion": false,
+    "specialEvent": null
+  },
+  {
+    "date": "2026-10-01",
+    "productId": "P002",
+    "productName": "輕便雨衣",
+    "salesQuantity": 2,
+    "isHoliday": false,
+    "isPromotion": false,
+    "specialEvent": null
+  },
+  {
+    "date": "2026-10-02",
+    "productId": "P001",
+    "productName": "鮪魚御飯糰",
+    "salesQuantity": 48,
+    "isHoliday": false,
+    "isPromotion": false,
+    "specialEvent": null
+  },
+  {
+    "date": "2026-10-02",
+    "productId": "P002",
+    "productName": "輕便雨衣",
+    "salesQuantity": 5,
+    "isHoliday": false,
+    "isPromotion": false,
+    "specialEvent": null
+  },
+  {
+    "date": "2026-10-03",
+    "productId": "P001",
+    "productName": "鮪魚御飯糰",
+    "salesQuantity": 65,
+    "isHoliday": true,
+    "isPromotion": false,
+    "specialEvent": "週末人潮"
+  },
+  {
+    "date": "2026-10-03",
+    "productId": "P002",
+    "productName": "輕便雨衣",
+    "salesQuantity": 3,
+    "isHoliday": true,
+    "isPromotion": false,
+    "specialEvent": null
+  },
+  {
+    "date": "2026-10-04",
+    "productId": "P001",
+    "productName": "鮪魚御飯糰",
+    "salesQuantity": 70,
+    "isHoliday": true,
+    "isPromotion": true,
+    "specialEvent": "週末促銷"
+  },
+  {
+    "date": "2026-10-04",
+    "productId": "P002",
+    "productName": "輕便雨衣",
+    "salesQuantity": 4,
+    "isHoliday": true,
+    "isPromotion": false,
+    "specialEvent": null
+  },
+  {
+    "date": "2026-10-07",
+    "productId": "P002",
+    "productName": "輕便雨衣",
+    "salesQuantity": 150,
+    "isHoliday": false,
+    "isPromotion": false,
+    "specialEvent": "附近舉辦大型戶外演唱會"
+  }
+]
