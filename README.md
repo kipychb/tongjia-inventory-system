@@ -96,3 +96,12 @@ node --test forecast.test.mjs replenishment.test.mjs
 A 組交付 A2 預測模組、模擬銷售資料、A1 補貨計算模組、A1/A2 串接測試及本文件。現有資料和庫存數字用於專題模擬；專案目前沒有正式商品庫存資料庫或企業 API。
 
 本專案以統家企業 EOS 為題，目標是根據銷售預測與門市庫存提供補貨建議，協助店長確認訂購數量。本版本目前包含 A1 補貨計算與 A2 需求預測的模擬模組及測試；正式介面、資料庫與訂單流程尚未包含。
+
+## C 組：店長操作介面
+
+整合 A、B1、B2 的網頁系統與教學影片腳本，請見 [README-C.md](README-C.md)。
+
+```bash
+npm start   # 開啟 http://localhost:3000/app/
+npm test    # 執行全部測試
+```
