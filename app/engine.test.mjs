@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { evaluateLine, lineStatus, makeApproval, buildOrder, parseQuantityInput } from './engine.mjs';
+import {
+  evaluateLine, lineStatus, makeApproval, buildOrder, parseQuantityInput, isHolidayDate, submittedOrderFor,
+} from './engine.mjs';
 import { PRODUCTS, EXTRA_SALES_DATA, STORE } from './store-data.mjs';
 
 const salesData = [
@@ -76,4 +78,85 @@ test('有待審核品項時不能產生補貨單；全部確認後產生含審�
   const audit = order.auditRecords.find(r => r.productId === 'P001');
   assert.equal(audit.reviewerId, 'SUP-01');
   assert.equal(audit.updatedQuantity, 580);
+});
+
+test('全部商品建議量與人工計算一致', () => {
+  // 依 README 公式人工計算：平均 → 四捨五入 → +安全庫存 − 庫存位置 → 最低訂購量／倍數
+  const expected = { P001: 58, P002: 45, P003: 17, P004: 30, P005: 48, P006: 0, P007: 35, P008: 9 };
+  for (const [id, qty] of Object.entries(expected)) {
+    assert.equal(line(id).aResult.suggestedQuantity, qty, id);
+  }
+});
+
+test('假日倍率：御飯糰 61 × 1.2 → 73，建議 70', () => {
+  const l = evaluateLine({ product: product('P001'), salesData, settings: { ...settings, isHoliday: true } });
+  assert.equal(l.aResult.forecastDemand, 73);
+  assert.equal(l.aResult.suggestedQuantity, 70);
+});
+
+test('建議 100 個御飯糰只需店長確認，不需主管', () => {
+  const l = line('P001', { orderQuantity: '100' });
+  assert.equal(l.b2.riskLevel, 'warning');
+});
+
+test('店長把建議量改成 0 需要確認，確認後不列入補貨單品項', () => {
+  const lines = PRODUCTS.map(p => evaluateLine({
+    product: p, salesData, settings, orderQuantity: p.productId === 'P002' ? '0' : undefined,
+  }));
+  const p2 = lines.find(l => l.productId === 'P002');
+  assert.equal(lineStatus(p2).key, 'warning');
+  const approvals = { P002: makeApproval(p2, { actorRole: 'store_manager', decision: 'approve', reason: '雨衣庫存足夠' }) };
+  const order = buildOrder({ store: STORE, settings, lines, approvals });
+  assert.ok(!order.items.some(i => i.productId === 'P002'));
+  assert.ok(order.auditRecords.some(r => r.productId === 'P002' && r.updatedQuantity === 0));
+});
+
+test('假日判斷與重複送單檢查', () => {
+  assert.equal(isHolidayDate('2026-10-08'), false); // 週四
+  assert.equal(isHolidayDate('2026-10-10'), true);  // 國慶日（週六）
+  assert.equal(isHolidayDate('2026-10-25'), true);
+  assert.equal(isHolidayDate('2026-10-12'), false);
+  const orders = [{ storeId: 'S0123', deliveryDate: '2026-10-08', orderId: 'X' }];
+  assert.equal(submittedOrderFor(orders, 'S0123', '2026-10-08').orderId, 'X');
+  assert.equal(submittedOrderFor(orders, 'S0123', '2026-10-09'), null);
+});
+
+test('故事情境：朋友辦活動訂 1000 件雨衣，店長二次確認後可送出，主管事後覆核', async () => {
+  const { makeStoreOverride, reviewOrderItem, pendingReviewCount } = await import('./engine.mjs');
+  const lines = PRODUCTS.map(p => evaluateLine({
+    product: p, salesData, settings, orderQuantity: p.productId === 'P002' ? '1000' : undefined,
+  }));
+  const coat = lines.find(l => l.productId === 'P002');
+  assert.equal(coat.quantity, 1000); // 沒有三位數限制
+  assert.equal(coat.b2.riskLevel, 'high');
+  const base = { reason: '團購或客人預訂', note: '朋友辦活動急需雨衣', confirmQuantity: '1000', acknowledged: true };
+  assert.equal(makeStoreOverride(coat, { ...base, confirmQuantity: '100' }).ok, false); // 再輸入不同 → 擋下
+  assert.equal(makeStoreOverride(coat, { ...base, acknowledged: false }).ok, false);
+  assert.equal(makeStoreOverride(coat, { ...base, note: '活動' }).ok, false);
+  const { ok, approval } = makeStoreOverride(coat, base);
+  assert.ok(ok);
+  assert.equal(lineStatus(coat, approval).key, 'override');
+
+  const order = buildOrder({ store: STORE, settings, lines, approvals: { P002: approval } });
+  assert.ok(order, '不必等主管即可產生補貨單');
+  assert.equal(order.items.find(i => i.productId === 'P002').quantity, 1000);
+  const rec = order.auditRecords.find(r => r.productId === 'P002');
+  assert.equal(rec.doubleConfirmed, true);
+  assert.equal(rec.postReview.status, 'pending');
+  assert.equal(pendingReviewCount(order), 1);
+  const reviewed = reviewOrderItem(order, 'P002', { reviewerId: 'SUP-01', note: '已電話確認' });
+  assert.equal(pendingReviewCount(reviewed), 0);
+});
+
+test('今晚盤點數：改變後建議量重算，無效盤點數禁止送單', () => {
+  // 鮮乳帳面 9 瓶，盤點只剩 5 瓶 → 26 − 5 = 21
+  assert.equal(line('P003', { countedOnHand: '5' }).aResult.suggestedQuantity, 21);
+  assert.equal(line('P003', { countedOnHand: '5' }).bookOnHand, 9);
+  assert.equal(lineStatus(line('P003', { countedOnHand: 'abc' })).key, 'blocked');
+  assert.equal(lineStatus(line('P003', { countedOnHand: '-1' })).key, 'blocked');
+  // 盤點改了、建議量跟著變 → 先前的確認失效
+  const before = line('P003', { orderQuantity: '40' });
+  const ap = makeApproval(before, { actorRole: 'store_manager', decision: 'approve', reason: '附近學校活動' });
+  const after = line('P003', { orderQuantity: '40', countedOnHand: '2' });
+  assert.equal(lineStatus(after, ap).canSubmit, false);
 });

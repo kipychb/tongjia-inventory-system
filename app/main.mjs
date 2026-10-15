@@ -3,6 +3,7 @@
  */
 import {
   evaluateLine, lineStatus, makeApproval, buildOrder, historyFor, parseQuantityInput,
+  isHolidayDate, submittedOrderFor, makeStoreOverride, reviewOrderItem, pendingReviewCount,
   HOLIDAY_MULTIPLIER, PROMOTION_MULTIPLIER, HISTORY_DAYS,
 } from './engine.mjs';
 import { B2_EVENT_REASONS } from '../b2-risk-review.mjs';
@@ -25,6 +26,7 @@ const state = {
   settings: { forecastDate: '2026-10-08', isHoliday: false, isPromotion: false },
   events: [],          // B2 特殊事件 + productId
   quantities: {},      // productId -> 店長輸入的原始字串
+  counts: {},          // productId -> 店長今晚盤點數（原始字串）
   approvals: {},       // productId -> makeApproval() 結果
   selected: null,
   salesData: [],
@@ -47,10 +49,6 @@ function toast(message) {
   toast.timer = setTimeout(() => { el.hidden = true; }, 3200);
 }
 
-function syncRole() {
-  $('#role-select').value = state.role;
-}
-
 /* ---------- 計算 ---------- */
 
 function eventFor(productId) {
@@ -66,6 +64,7 @@ function recompute() {
     return evaluateLine({
       product, salesData: state.salesData, settings: state.settings, specialEvent,
       orderQuantity: state.quantities[product.productId],
+      countedOnHand: state.counts[product.productId],
     });
   });
 }
@@ -89,8 +88,9 @@ function renderReplenish() {
   const pendingMgr = statuses.filter(s => s.key === 'high').length;
   const blocked = statuses.filter(s => s.key === 'blocked' || s.key === 'rejected').length;
   const total = lines.reduce((s, l) => s + (typeof l.quantity === 'number' && l.quantity > 0 ? l.quantity : 0), 0);
-  const ready = !pendingStore && !pendingMgr && !blocked && total > 0;
   const { settings } = state;
+  const submitted = submittedOrderFor(state.orders, STORE.storeId, settings.forecastDate);
+  const ready = !submitted && !pendingStore && !pendingMgr && !blocked && total > 0;
 
   $('#tab-replenish').innerHTML = `
     <div class="settings card">
@@ -109,14 +109,14 @@ function renderReplenish() {
       <div class="stat"><span>商品品項</span><strong>${lines.length}</strong></div>
       <div class="stat"><span>需要補貨</span><strong>${needCount}</strong></div>
       <div class="stat warn"><span>待店長確認</span><strong>${pendingStore}</strong></div>
-      <div class="stat high"><span>待主管審核</span><strong>${pendingMgr}</strong></div>
+      <div class="stat high"><span>高風險待確認</span><strong>${pendingMgr}</strong></div>
       <div class="stat"><span>本次訂貨總量</span><strong>${fmt(total)}</strong></div>
     </div>
 
     <div class="card table-wrap">
       <table class="grid">
         <thead><tr>
-          <th>商品</th><th class="num">現有庫存</th><th class="num">在途</th>
+          <th>商品</th><th class="num">帳面庫存</th><th class="num">今晚盤點</th><th class="num">在途</th>
           <th class="num">預測需求</th><th class="num">安全庫存</th>
           <th class="num">系統建議</th><th class="num">訂貨量</th><th>狀態</th><th></th>
         </tr></thead>
@@ -125,8 +125,9 @@ function renderReplenish() {
     </div>
 
     <div class="actionbar">
-      <p>${ready ? '所有品項已檢查完成，可以產生補貨單。'
-        : blocked ? `有 ${blocked} 個品項資料錯誤或被退回，請先修正訂貨量。`
+      <p>${submitted ? `${esc(settings.forecastDate)} 的補貨單 ${esc(submitted.orderId)} 已送出，同一到貨日不能重複訂貨。`
+        : ready ? '所有品項已檢查完成，可以產生補貨單。'
+        : blocked ? `有 ${blocked} 個品項資料錯誤或被退回，請先修正盤點數或訂貨量。`
         : pendingStore || pendingMgr ? `尚有 ${pendingStore + pendingMgr} 個品項需要確認或審核（點「明細」處理）。`
         : '目前沒有需要訂貨的品項。'}</p>
       <button class="btn primary" id="build-order" ${ready ? '' : 'disabled'}>產生補貨單</button>
@@ -146,7 +147,8 @@ function rowHtml(line) {
     <td><div class="pname">${esc(product.name)}</div>
       <div class="muted small">${esc(product.productId)}・${esc(product.category)}${
         product.orderMultiple > 1 ? `・每箱 ${product.orderMultiple}` : ''}</div>${flags}</td>
-    <td class="num">${fmt(product.onHand)}</td>
+    <td class="num muted">${fmt(line.bookOnHand)}</td>
+    <td class="num">${countInput(line)}</td>
     <td class="num">${fmt(product.onOrder)}</td>
     <td class="num">${fmt(aResult.forecastDemand)}</td>
     <td class="num">${fmt(product.safetyStock)}</td>
@@ -156,6 +158,15 @@ function rowHtml(line) {
     <td>${riskBadge(line)}</td>
     <td><button class="btn small" data-detail="${esc(product.productId)}">明細</button></td>
   </tr>`;
+}
+
+function countInput(line) {
+  const raw = state.counts[line.productId];
+  const value = raw === undefined ? line.bookOnHand : raw;
+  const cls = line.countError ? 'invalid'
+    : raw !== undefined && parseQuantityInput(raw) !== line.bookOnHand ? 'changed' : '';
+  return `<input class="count ${cls}" inputmode="numeric" aria-label="${esc(line.product.name)} 今晚盤點數"
+    data-pid="${esc(line.productId)}" value="${esc(value)}">`;
 }
 
 /* ---------- 明細側欄 ---------- */
@@ -203,7 +214,7 @@ function renderDrawer() {
         ${calc.extraDemand ? `<li>特殊事件額外需求 + ${fmt(calc.extraDemand)} → 預測需求 <b>${fmt(aResult.forecastDemand)}</b></li>` : ''}
         ${calc.eventOutsidePeriod ? '<li class="muted">已登錄的特殊事件不在預測日期內，未加入需求</li>' : ''}
         <li>目標庫存 = 預測需求 ${fmt(aResult.forecastDemand)} + 安全庫存 ${fmt(aResult.safetyStock)} = <b>${fmt(aResult.targetStock)}</b></li>
-        <li>庫存位置 = 現有 ${fmt(product.onHand)} + 在途 ${fmt(product.onOrder)} − 欠貨 ${fmt(product.backorders)} = <b>${fmt(aResult.inventoryPosition)}</b></li>
+        <li>庫存位置 = 盤點 ${fmt(product.onHand)}${product.onHand !== line.bookOnHand ? `（帳面 ${fmt(line.bookOnHand)}）` : ''} + 在途 ${fmt(product.onOrder)} − 欠貨 ${fmt(product.backorders)} = <b>${fmt(aResult.inventoryPosition)}</b></li>
         <li>需補量 = max(0, ${fmt(aResult.targetStock)} − ${fmt(aResult.inventoryPosition)}) = <b>${fmt(aResult.unconstrainedQuantity)}</b></li>
         ${rounding ? `<li>依最低訂購量 ${fmt(product.minimumOrderQuantity)}、整箱倍數 ${fmt(product.orderMultiple)} 調整</li>` : ''}
       </ol>
@@ -216,15 +227,27 @@ function renderDrawer() {
       <h3>3. 風險檢查（B1 異常偵測＋B2 風險審核）</h3>
       <p>風險等級：${riskBadge(line)}</p>
       ${allIssues.length ? `<ul class="issues">${allIssues.map(i => `
-        <li class="lvl-${esc(i.level)}"><span>${esc(levelLabel(i.level))}</span>${esc(i.message)}</li>`).join('')}</ul>`
+        <li class="lvl-${esc(i.level)}"><span>${esc(levelLabel(i.level))}</span>${esc(issueText(i))}</li>`).join('')}</ul>`
         : '<p class="ok-text">✓ 沒有發現異常</p>'}
       <ul class="checks">${checks.map(([name, done]) => `
         <li>${done ? '✓' : '—'} ${name}${done ? '' : '：非效期商品，不適用'}</li>`).join('')}
-        <li>✓ 到貨後預估庫存 ${fmt(line.riskProduct.expectedStockAtArrival + (typeof line.quantity === 'number' ? line.quantity : 0))} ／容量 ${fmt(product.maxCapacity)}</li>
+        ${capacityLine(line)}
       </ul>
     </section>
 
     ${approvalHtml(line, status)}`;
+}
+
+function capacityLine(line) {
+  const projected = line.riskProduct.expectedStockAtArrival +
+    (typeof line.quantity === 'number' ? line.quantity : 0);
+  const over = projected > line.product.maxCapacity;
+  return `<li class="${over ? 'over' : ''}">${over ? '✗' : '✓'} 到貨後預估庫存 ${fmt(projected)} ／容量 ${fmt(line.product.maxCapacity)}${over ? '（超過容量）' : ''}</li>`;
+}
+
+// B2 原文寫「需主管審核」；C 組流程改為店長二次確認、主管事後覆核，顯示時對齊新流程
+function issueText(issue) {
+  return issue.message.replace('需主管審核', '需店長二次確認，主管事後覆核');
 }
 
 function levelLabel(level) {
@@ -235,26 +258,22 @@ function approvalHtml(line, status) {
   const approval = state.approvals[line.productId];
   if (status.key === 'ok') return '';
   if (status.key === 'blocked') {
-    return '<section class="approve"><h3>4. 需要修正</h3><p>訂貨量格式錯誤（空白、文字、小數或負數），系統禁止送出，請回到列表修正。</p></section>';
+    return `<section class="approve"><h3>4. 需要修正</h3><p>${line.countError
+      ? '今晚盤點數必須是 0 以上的整數，請回到列表修正。'
+      : '訂貨量格式錯誤（空白、文字、小數或負數），系統禁止送出，請回到列表修正。'}</p></section>`;
   }
-  if (status.key === 'approved' || status.key === 'rejected') {
+  if (status.key === 'approved' || status.key === 'rejected' || status.key === 'override') {
     const d = approval.decision;
     return `<section class="approve done"><h3>4. 確認紀錄</h3>
       <p>${d.actorRole === 'supervisor' ? `主管 ${esc(d.reviewerId)}` : '店長'}
-        ${d.reviewStatus === 'rejected' ? '已退回' : '已核准'}：「${esc(d.reason)}」</p>
+        ${d.reviewStatus === 'rejected' ? '已退回' : '已確認'}：「${esc(d.reason)}」</p>
+      ${status.key === 'override'
+        ? '<p class="muted">店長已二次確認並承擔責任，補貨單會照常送出；區督導之後在「補貨單紀錄」事後覆核。</p>' : ''}
       <button class="btn ghost" id="undo-approval">撤銷確認</button></section>`;
   }
   const needManager = status.key === 'high';
   const isManagerRole = state.role === 'supervisor';
-  if (needManager && !isManagerRole) {
-    return `<section class="approve"><h3>4. 需要主管審核</h3>
-      <p>此訂貨量屬於高風險（大量訂貨、超過容量或效期風險），店長無法自行核准。
-      請修改訂貨量，或請區督導切換身分後審核。</p>
-      <div class="row">
-        <button class="btn primary" id="revert-qty">改回系統建議量 ${fmt(line.aResult.suggestedQuantity)}</button>
-        <button class="btn" id="as-supervisor">切換為區督導身分（模擬）</button>
-      </div></section>`;
-  }
+  if (needManager && !isManagerRole) return overrideHtml(line);
   return `<section class="approve">
     <h3>4. ${needManager ? '主管審核' : '店長確認'}</h3>
     <div class="field"><label for="ap-reason">原因</label>
@@ -270,6 +289,44 @@ function approvalHtml(line, status) {
     </div>
     <p id="ap-error" class="hint warn" hidden></p>
   </section>`;
+}
+
+function overrideHtml(line) {
+  return `<section class="approve">
+    <h3>4. 高風險訂貨：店長二次確認</h3>
+    <p>這個數量明顯超出平常，可能是手誤，也可能真的有特殊需求。
+      系統<b>不會扣單，也不必等主管</b>：確認是真實需求後就能送出，區督導事後覆核。</p>
+    <div class="field"><label for="ov-reason">原因</label>
+      <select id="ov-reason">${CONFIRM_REASONS.map(r => `<option>${esc(r)}</option>`).join('')}</select></div>
+    <div class="field"><label for="ov-note">補充說明（至少 5 個字）</label>
+      <input id="ov-note" placeholder="例如：朋友週末辦戶外活動，需要雨衣"></div>
+    <div class="field"><label for="ov-confirm">請再輸入一次訂貨量（防止多按或少按）</label>
+      <input id="ov-confirm" inputmode="numeric" autocomplete="off"></div>
+    <label class="check ack"><input type="checkbox" id="ov-ack">
+      我確認此數量正確，由店長負責，送出後由區督導事後覆核</label>
+    <div class="row">
+      <button class="btn primary" id="override-submit">二次確認此數量</button>
+      <button class="btn ghost" id="revert-qty">改回系統建議量 ${fmt(line.aResult.suggestedQuantity)}</button>
+    </div>
+    <p id="ap-error" class="hint warn" hidden></p>
+  </section>`;
+}
+
+function submitOverride() {
+  const line = state.lines.find(l => l.productId === state.selected);
+  const result = makeStoreOverride(line, {
+    reason: $('#ov-reason').value, note: $('#ov-note').value,
+    confirmQuantity: $('#ov-confirm').value, acknowledged: $('#ov-ack').checked,
+  });
+  if (!result.ok) {
+    const err = $('#ap-error');
+    err.textContent = result.error;
+    err.hidden = false;
+    return;
+  }
+  state.approvals[line.productId] = result.approval;
+  toast(`${line.product.name} 已二次確認，送出後由主管事後覆核`);
+  render();
 }
 
 function submitApproval(decision) {
@@ -360,7 +417,8 @@ function openOrderPreview() {
   recompute(); // 送單前以最新資料重新執行 A/B1/B2
   const order = buildOrder({
     store: STORE, settings: state.settings, lines: state.lines,
-    approvals: state.approvals, sequence: state.orders.length + 1,
+    approvals: state.approvals,
+    sequence: state.orders.filter(o => o.storeId === STORE.storeId).length + 1,
   });
   if (!order) { toast('仍有品項未完成確認'); render(); return; }
   const dialog = $('#order-dialog');
@@ -371,11 +429,27 @@ function openOrderPreview() {
     saveOrders();
     state.quantities = {};
     state.approvals = {};
+    state.counts = {};
     dialog.close();
     toast(`補貨單 ${order.orderId} 已送交統家總部（模擬）`);
     state.tab = 'orders';
     render();
   });
+}
+
+function riskText(item) {
+  if (item.postReview) return '店長二次確認';
+  return { normal: '正常', warning: '已確認', high: '主管核准' }[item.riskLevel] ?? item.riskLevel;
+}
+
+function reviewText(r) {
+  if (!r.postReview) return '';
+  if (r.postReview.status === 'reviewed') {
+    return `<span class="badge badge-approved">主管 ${esc(r.postReview.reviewerId)} 已覆核</span>`;
+  }
+  return state.role === 'supervisor'
+    ? `<button class="btn small primary" data-review="${esc(r.productId)}">覆核通過</button>`
+    : '<span class="badge badge-warning">待主管事後覆核</span>';
 }
 
 function orderHtml(order, preview) {
@@ -392,13 +466,15 @@ function orderHtml(order, preview) {
       <thead><tr><th>商品</th><th class="num">系統建議</th><th class="num">訂貨量</th><th>風險</th></tr></thead>
       <tbody>${order.items.map(i => `<tr><td>${esc(i.productId)} ${esc(i.name)}</td>
         <td class="num">${fmt(i.suggestedQuantity)}</td><td class="num strong">${fmt(i.quantity)} ${esc(i.unit)}</td>
-        <td>${esc({ normal: '正常', warning: '已確認', high: '主管核准' }[i.riskLevel] ?? i.riskLevel)}</td></tr>`).join('')}</tbody>
+        <td>${esc(riskText(i))}</td></tr>`).join('')}</tbody>
       <tfoot><tr><td>合計</td><td></td><td class="num strong">${fmt(order.totalQuantity)}</td><td></td></tr></tfoot>
     </table>
     ${reviewed.length ? `<h3>審核紀錄</h3><ul class="audit">${reviewed.map(r => `<li>
       <b>${esc(r.productId)}</b> 建議 ${fmt(r.suggestedQuantity)} → 訂購 ${fmt(r.updatedQuantity)}，
-      ${r.actorRole === 'supervisor' ? `主管 ${esc(r.reviewerId)}` : '店長'}核准：${esc(r.reason)}
-      <span class="muted">（${esc(r.riskIssueCodes.concat(r.b1IssueCodes).join(', '))}）</span></li>`).join('')}</ul>` : ''}
+      ${r.actorRole === 'supervisor' ? `主管 ${esc(r.reviewerId)}核准`
+        : r.doubleConfirmed ? '店長二次確認' : '店長確認'}：${esc(r.reason)}
+      <span class="muted">（${esc(r.riskIssueCodes.concat(r.b1IssueCodes).join(', '))}）</span>
+      ${preview ? '' : reviewText(r)}</li>`).join('')}</ul>` : ''}
     ${preview ? `<div class="row end"><button class="btn ghost" data-close-dialog>返回修改</button>
       <button class="btn primary" id="confirm-submit">確認送出給統家總部</button></div>` : ''}
   </div>`;
@@ -407,12 +483,14 @@ function orderHtml(order, preview) {
 function renderOrders() {
   $('#tab-orders').innerHTML = `<div class="card">
     <h2>補貨單紀錄</h2>
-    <p class="muted">補貨單為模擬送出，紀錄儲存在這台電腦的瀏覽器中。</p>
+    <p class="muted">補貨單為模擬送出，紀錄儲存在這台電腦的瀏覽器中。
+      店長二次確認的高風險品項，由區督導在這裡點「查看」事後覆核。</p>
     ${state.orders.length ? `<table class="grid"><thead><tr><th>單號</th><th>到貨日</th><th class="num">品項</th>
       <th class="num">總量</th><th>狀態</th><th></th></tr></thead><tbody>
       ${state.orders.map((o, i) => `<tr><td>${esc(o.orderId)}</td><td>${esc(o.deliveryDate)}</td>
         <td class="num">${o.items.length}</td><td class="num">${fmt(o.totalQuantity)}</td>
-        <td><span class="badge badge-ok">已送出</span></td>
+        <td><span class="badge badge-ok">已送出</span>${pendingReviewCount(o)
+          ? ` <span class="badge badge-warning">${pendingReviewCount(o)} 項待事後覆核</span>` : ''}</td>
         <td><button class="btn small" data-view-order="${i}">查看</button></td></tr>`).join('')}
       </tbody></table>
       <button class="btn ghost" id="clear-orders">清除示範紀錄</button>` : '<p>尚未送出任何補貨單。</p>'}
@@ -453,7 +531,7 @@ function renderModel() {
         <tr><td>超過建議量 ${B1_DEFAULT_POLICY.upwardRatio} 倍、少於 ${B1_DEFAULT_POLICY.downwardRatio * 100}%、或達 ${B1_DEFAULT_POLICY.largeOrderQuantity} 件</td>
           <td><span class="badge badge-warning">店長選原因確認</span></td></tr>
         <tr><td>超過建議量 ${B2_DEFAULT_POLICY.highOrderRatio} 倍、超過儲存容量、嚴重效期風險</td>
-          <td><span class="badge badge-high">主管審核</span></td></tr>
+          <td><span class="badge badge-high">店長二次確認後送出，主管事後覆核</span></td></tr>
         <tr><td>登錄特殊事件</td><td><span class="badge badge-warning">店長確認並留下紀錄</span></td></tr>
       </tbody>
     </table>
@@ -492,7 +570,8 @@ function render() {
   }
   // 保留輸入框焦點與游標位置，避免重繪打斷店長輸入
   const active = document.activeElement;
-  const focusPid = active?.classList?.contains('qty') ? active.dataset.pid : null;
+  const focusCls = ['qty', 'count'].find(c => active?.classList?.contains(c));
+  const focusPid = focusCls ? active.dataset.pid : null;
   const caret = focusPid ? active.selectionStart : null;
 
   if (state.tab === 'replenish') renderReplenish();
@@ -502,7 +581,7 @@ function render() {
   renderDrawer();
 
   if (focusPid) {
-    const input = document.querySelector(`.qty[data-pid="${focusPid}"]`);
+    const input = document.querySelector(`.${focusCls}[data-pid="${focusPid}"]`);
     input?.focus();
     input?.setSelectionRange(caret, caret);
   }
@@ -516,6 +595,17 @@ document.addEventListener('click', (e) => {
   if (t.id === 'close-drawer') { state.selected = null; render(); return; }
   if (t.id === 'reset-qty') { state.quantities = {}; state.approvals = {}; render(); return; }
   if (t.id === 'approve') { submitApproval('approve'); return; }
+  if (t.id === 'override-submit') { submitOverride(); return; }
+  if (t.dataset.review) {
+    const dialog = $('#order-dialog');
+    const idx = Number(dialog.dataset.orderIndex);
+    state.orders[idx] = reviewOrderItem(state.orders[idx], t.dataset.review,
+      { reviewerId: 'SUP-01', note: '事後覆核通過' });
+    saveOrders();
+    dialog.innerHTML = orderHtml(state.orders[idx], false);
+    toast('已完成事後覆核');
+    render(); return;
+  }
   if (t.id === 'reject') { submitApproval('reject'); return; }
   if (t.id === 'undo-approval') { delete state.approvals[state.selected]; render(); return; }
   if (t.id === 'revert-qty') {
@@ -523,7 +613,6 @@ document.addEventListener('click', (e) => {
     delete state.approvals[state.selected];
     toast('已改回系統建議量'); render(); return;
   }
-  if (t.id === 'as-supervisor') { state.role = 'supervisor'; syncRole(); render(); return; }
   if (t.id === 'build-order') { openOrderPreview(); return; }
   if (t.dataset.removeEvent !== undefined) {
     const [ev] = state.events.splice(Number(t.dataset.removeEvent), 1);
@@ -533,6 +622,7 @@ document.addEventListener('click', (e) => {
   }
   if (t.dataset.viewOrder !== undefined) {
     const dialog = $('#order-dialog');
+    dialog.dataset.orderIndex = t.dataset.viewOrder;
     dialog.innerHTML = orderHtml(state.orders[Number(t.dataset.viewOrder)], false);
     dialog.showModal(); return;
   }
@@ -546,12 +636,19 @@ document.addEventListener('input', (e) => {
   if (e.target.classList.contains('qty')) {
     state.quantities[e.target.dataset.pid] = e.target.value;
     render();
+  } else if (e.target.classList.contains('count')) {
+    // 盤點數改變 → 建議量重算；店長沒改過訂貨量時，訂貨量自動跟著新建議量
+    state.counts[e.target.dataset.pid] = e.target.value;
+    render();
   }
 });
 
 document.addEventListener('change', (e) => {
   const { id } = e.target;
-  if (id === 'forecast-date') state.settings.forecastDate = e.target.value || state.settings.forecastDate;
+  if (id === 'forecast-date') {
+    state.settings.forecastDate = e.target.value || state.settings.forecastDate;
+    state.settings.isHoliday = isHolidayDate(state.settings.forecastDate);
+  }
   else if (id === 'is-holiday') state.settings.isHoliday = e.target.checked;
   else if (id === 'is-promotion') state.settings.isPromotion = e.target.checked;
   else if (id === 'role-select') state.role = e.target.value;
