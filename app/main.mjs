@@ -3,6 +3,7 @@
  */
 import {
   evaluateLine, lineStatus, makeApproval, buildOrder, historyFor, parseQuantityInput,
+  isHolidayDate, submittedOrderFor,
   HOLIDAY_MULTIPLIER, PROMOTION_MULTIPLIER, HISTORY_DAYS,
 } from './engine.mjs';
 import { B2_EVENT_REASONS } from '../b2-risk-review.mjs';
@@ -89,8 +90,9 @@ function renderReplenish() {
   const pendingMgr = statuses.filter(s => s.key === 'high').length;
   const blocked = statuses.filter(s => s.key === 'blocked' || s.key === 'rejected').length;
   const total = lines.reduce((s, l) => s + (typeof l.quantity === 'number' && l.quantity > 0 ? l.quantity : 0), 0);
-  const ready = !pendingStore && !pendingMgr && !blocked && total > 0;
   const { settings } = state;
+  const submitted = submittedOrderFor(state.orders, STORE.storeId, settings.forecastDate);
+  const ready = !submitted && !pendingStore && !pendingMgr && !blocked && total > 0;
 
   $('#tab-replenish').innerHTML = `
     <div class="settings card">
@@ -125,7 +127,8 @@ function renderReplenish() {
     </div>
 
     <div class="actionbar">
-      <p>${ready ? '所有品項已檢查完成，可以產生補貨單。'
+      <p>${submitted ? `${esc(settings.forecastDate)} 的補貨單 ${esc(submitted.orderId)} 已送出，同一到貨日不能重複訂貨。`
+        : ready ? '所有品項已檢查完成，可以產生補貨單。'
         : blocked ? `有 ${blocked} 個品項資料錯誤或被退回，請先修正訂貨量。`
         : pendingStore || pendingMgr ? `尚有 ${pendingStore + pendingMgr} 個品項需要確認或審核（點「明細」處理）。`
         : '目前沒有需要訂貨的品項。'}</p>
@@ -220,11 +223,18 @@ function renderDrawer() {
         : '<p class="ok-text">✓ 沒有發現異常</p>'}
       <ul class="checks">${checks.map(([name, done]) => `
         <li>${done ? '✓' : '—'} ${name}${done ? '' : '：非效期商品，不適用'}</li>`).join('')}
-        <li>✓ 到貨後預估庫存 ${fmt(line.riskProduct.expectedStockAtArrival + (typeof line.quantity === 'number' ? line.quantity : 0))} ／容量 ${fmt(product.maxCapacity)}</li>
+        ${capacityLine(line)}
       </ul>
     </section>
 
     ${approvalHtml(line, status)}`;
+}
+
+function capacityLine(line) {
+  const projected = line.riskProduct.expectedStockAtArrival +
+    (typeof line.quantity === 'number' ? line.quantity : 0);
+  const over = projected > line.product.maxCapacity;
+  return `<li class="${over ? 'over' : ''}">${over ? '✗' : '✓'} 到貨後預估庫存 ${fmt(projected)} ／容量 ${fmt(line.product.maxCapacity)}${over ? '（超過容量）' : ''}</li>`;
 }
 
 function levelLabel(level) {
@@ -360,7 +370,8 @@ function openOrderPreview() {
   recompute(); // 送單前以最新資料重新執行 A/B1/B2
   const order = buildOrder({
     store: STORE, settings: state.settings, lines: state.lines,
-    approvals: state.approvals, sequence: state.orders.length + 1,
+    approvals: state.approvals,
+    sequence: state.orders.filter(o => o.storeId === STORE.storeId).length + 1,
   });
   if (!order) { toast('仍有品項未完成確認'); render(); return; }
   const dialog = $('#order-dialog');
@@ -551,7 +562,10 @@ document.addEventListener('input', (e) => {
 
 document.addEventListener('change', (e) => {
   const { id } = e.target;
-  if (id === 'forecast-date') state.settings.forecastDate = e.target.value || state.settings.forecastDate;
+  if (id === 'forecast-date') {
+    state.settings.forecastDate = e.target.value || state.settings.forecastDate;
+    state.settings.isHoliday = isHolidayDate(state.settings.forecastDate);
+  }
   else if (id === 'is-holiday') state.settings.isHoliday = e.target.checked;
   else if (id === 'is-promotion') state.settings.isPromotion = e.target.checked;
   else if (id === 'role-select') state.role = e.target.value;

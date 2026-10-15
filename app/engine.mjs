@@ -13,6 +13,22 @@ export const HOLIDAY_MULTIPLIER = 1.2;
 export const PROMOTION_MULTIPLIER = 1.3;
 export const HISTORY_DAYS = 3;
 
+// 固定日期的國定假日（月-日）；農曆節日與補假請店長手動勾選
+const FIXED_HOLIDAYS = new Set(['01-01', '02-28', '04-04', '05-01', '09-28', '10-10', '10-25', '12-25']);
+
+/** 依日期預設是否為假日：週六、週日或固定日期國定假日。店長仍可手動修改。 */
+export function isHolidayDate(date) {
+  const d = new Date(date + 'T00:00:00Z');
+  if (Number.isNaN(d.getTime())) return false;
+  const day = d.getUTCDay();
+  return day === 0 || day === 6 || FIXED_HOLIDAYS.has(date.slice(5));
+}
+
+/** 同一門市、同一到貨日已送出的補貨單（避免重複訂貨）。 */
+export function submittedOrderFor(orders, storeId, deliveryDate) {
+  return orders.find(o => o.storeId === storeId && o.deliveryDate === deliveryDate) ?? null;
+}
+
 /**
  * 店長輸入框的字串轉成數字；無法辨識時保留原字串，交給 B1 防呆阻擋。
  */
