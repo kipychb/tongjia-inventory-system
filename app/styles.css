@@ -152,6 +152,7 @@ input:focus, select:focus, button:focus-visible { outline: 2px solid var(--brand
 .issues .lvl-high { background: var(--high-bg); color: var(--high-fg); }
 .issues .lvl-info { background: var(--info-bg); color: var(--info-fg); }
 .checks li { color: var(--muted); font-size: .88rem; }
+.checks li.over { color: var(--high-fg); font-weight: 600; }
 .ok-text { color: var(--ok-fg); font-weight: 600; }
 .hint { margin: 8px 0 0; font-size: .88rem; }
 .hint.warn { color: var(--warn-fg); }
