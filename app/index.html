@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>統家 EOS 自動補貨系統</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">統</span>
+      <div>
+        <h1>統家 EOS 自動補貨系統</h1>
+        <p id="store-name" class="muted"></p>
+      </div>
+    </div>
+    <div class="role">
+      <label for="role-select">目前身分（模擬登入）</label>
+      <select id="role-select">
+        <option value="store_manager">店長</option>
+        <option value="supervisor">區督導（主管）</option>
+      </select>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="replenish" aria-selected="true">① 今日補貨</button>
+    <button role="tab" data-tab="events">② 特殊事件登錄</button>
+    <button role="tab" data-tab="orders">③ 補貨單紀錄</button>
+    <button role="tab" data-tab="model">補貨模型說明</button>
+  </nav>
+
+  <main>
+    <section id="tab-replenish" class="tab-panel"></section>
+    <section id="tab-events" class="tab-panel" hidden></section>
+    <section id="tab-orders" class="tab-panel" hidden></section>
+    <section id="tab-model" class="tab-panel" hidden></section>
+  </main>
+
+  <aside id="drawer" class="drawer" hidden aria-label="商品補貨明細"></aside>
+  <div id="drawer-backdrop" class="backdrop" hidden></div>
+  <dialog id="order-dialog"></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script type="module" src="main.mjs"></script>
+</body>
+</html>
